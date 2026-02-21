@@ -14,11 +14,14 @@ from pathlib import Path
 
 # Add lib directory to Python path (works both from repo and installed location)
 SCRIPT_DIR = Path(__file__).parent
-LIB_DIR = SCRIPT_DIR.parent / 'lib' / 'brightness-control'
+if (SCRIPT_DIR.parent / 'lib' / 'monitor_detector.py').exists():
+    LIB_DIR = SCRIPT_DIR.parent / 'lib'
+else:
+    LIB_DIR = SCRIPT_DIR.parent / 'lib' / 'brightness-control'
 sys.path.insert(0, str(LIB_DIR))
 
 from monitor_detector import detect_monitors
-from ddcutil_wrapper import get_brightness, set_brightness, MonitorCache
+from ddcutil_wrapper import get_brightness, set_brightness, MonitorCache, BrightnessCache, bus_lock
 
 
 BRIGHTNESS_STEP = 10
@@ -53,27 +56,36 @@ def adjust_brightness(monitor_slot: int, action: str) -> None:
 
     monitor = monitors[monitor_slot - 1]
 
-    try:
-        current = get_brightness(monitor.i2c_bus)
-    except RuntimeError:
-        # Cache may be stale (monitor reconnected on different bus) — re-detect
-        cache.invalidate()
-        monitors = detect_monitors()
-        cache.set(monitors)
-        if monitor_slot > len(monitors):
-            raise RuntimeError(
-                f"Monitor slot {monitor_slot} not available after re-detection"
-            )
-        monitor = monitors[monitor_slot - 1]
-        current = get_brightness(monitor.i2c_bus)
+    with bus_lock(monitor.i2c_bus):
+        b_cache = BrightnessCache(monitor.i2c_bus)
+        current = b_cache.get()
 
-    if action == 'up':
-        new_brightness = min(current + BRIGHTNESS_STEP, MAX_BRIGHTNESS)
-    else:
-        new_brightness = max(current - BRIGHTNESS_STEP, MIN_BRIGHTNESS)
+        if current is None:
+            try:
+                current = get_brightness(monitor.i2c_bus)
+                b_cache.set(current)
+            except RuntimeError:
+                # Cache may be stale (monitor reconnected on different bus) — re-detect
+                cache.invalidate()
+                monitors = detect_monitors()
+                cache.set(monitors)
+                if monitor_slot > len(monitors):
+                    raise RuntimeError(
+                        f"Monitor slot {monitor_slot} not available after re-detection"
+                    )
+                monitor = monitors[monitor_slot - 1]
+                b_cache = BrightnessCache(monitor.i2c_bus)  # New cache object for new bus
+                current = get_brightness(monitor.i2c_bus)
+                b_cache.set(current)
 
-    if new_brightness != current:
-        set_brightness(monitor.i2c_bus, new_brightness)
+        if action == 'up':
+            new_brightness = min(current + BRIGHTNESS_STEP, MAX_BRIGHTNESS)
+        else:
+            new_brightness = max(current - BRIGHTNESS_STEP, MIN_BRIGHTNESS)
+
+        if new_brightness != current:
+            set_brightness(monitor.i2c_bus, new_brightness)
+            b_cache.set(new_brightness)
 
 
 def show_monitors() -> None:

@@ -11,6 +11,8 @@ import os
 import re
 import subprocess
 import time
+import fcntl
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -91,6 +93,60 @@ class MonitorCache:
             pass
 
 
+@contextmanager
+def bus_lock(i2c_bus: str):
+    """File lock to serialize access to the specific I2C bus."""
+    bus_num = _extract_bus_number(i2c_bus)
+    lock_file = Path(f"/tmp/brightness-control-{os.getenv('USER', 'unknown')}-bus{bus_num}.lock")
+    
+    with open(lock_file, 'w') as f:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
+class BrightnessCache:
+    """Caches the current brightness state per I2C bus."""
+
+    def __init__(self, i2c_bus: str, cache_duration: int = 600):
+        self.i2c_bus = i2c_bus
+        bus_num = _extract_bus_number(i2c_bus)
+        self.cache_file = Path(f"/tmp/brightness-control-{os.getenv('USER', 'unknown')}-bus{bus_num}-brightness.json")
+        self.cache_duration = cache_duration
+
+    def get(self):
+        try:
+            if not self.cache_file.exists():
+                return None
+            with open(self.cache_file) as f:
+                data = json.load(f)
+            if time.time() - data.get('timestamp', 0) > self.cache_duration:
+                return None
+            return data.get('brightness')
+        except (json.JSONDecodeError, OSError, KeyError):
+            return None
+
+    def set(self, value: int):
+        try:
+            data = {
+                'timestamp': time.time(),
+                'brightness': value
+            }
+            with open(self.cache_file, 'w') as f:
+                json.dump(data, f)
+        except OSError:
+            pass
+
+    def invalidate(self):
+        try:
+            if self.cache_file.exists():
+                self.cache_file.unlink()
+        except OSError:
+            pass
+
+
 def get_brightness(i2c_bus: str, max_retries: int = 3) -> int:
     """
     Get current brightness level for a monitor.
@@ -111,7 +167,7 @@ def get_brightness(i2c_bus: str, max_retries: int = 3) -> int:
     for attempt in range(max_retries):
         try:
             result = subprocess.run(
-                ['ddcutil', '--bus', bus_num, 'getvcp', hex(VCP_BRIGHTNESS)],
+                ['ddcutil', '--sleep-multiplier', '.1', '--bus', bus_num, 'getvcp', hex(VCP_BRIGHTNESS)],
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -178,7 +234,7 @@ def set_brightness(i2c_bus: str, value: int, max_retries: int = 3) -> None:
     for attempt in range(max_retries):
         try:
             result = subprocess.run(
-                ['ddcutil', '--bus', bus_num, 'setvcp', hex(VCP_BRIGHTNESS), str(value)],
+                ['ddcutil', '--noverify', '--sleep-multiplier', '.1', '--bus', bus_num, 'setvcp', hex(VCP_BRIGHTNESS), str(value)],
                 capture_output=True,
                 text=True,
                 timeout=5,
