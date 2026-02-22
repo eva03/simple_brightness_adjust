@@ -39,7 +39,7 @@ def detect_monitors() -> List[Monitor]:
     """
     try:
         result = subprocess.run(
-            ['ddcutil', 'detect'],
+            ['ddcutil', 'detect', "--sleep-multiplier", ".1"],
             capture_output=True,
             text=True,
             timeout=30
